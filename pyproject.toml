@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-mcp-memory"
-version = "0.2.0"
+version = "0.2.1"
 description = "Production-ready MCP memory server with semantic search, project conventions learning, and comprehensive memory management for OpenCode"
 readme = "README.md"
 license = "MIT"

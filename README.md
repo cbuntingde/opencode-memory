@@ -40,11 +40,6 @@ Then run directly:
 mcp-memory
 ```
 
-Or use with `uvx`:
-```bash
-uvx opencode-mcp-memory
-```
-
 ### From Source (development)
 
 ```bash
@@ -59,15 +54,14 @@ mcp-memory
 
 ### For OpenCode Integration
 
-Use `uvx` in your MCP configuration:
+Add the server to your opencode config (`opencode.json` or `opencode.jsonc`):
 
-```json
+```jsonc
 {
-  "mcpServers": {
+  "mcp": {
     "opencode-memory": {
-      "command": "uvx",
-      "args": ["opencode-mcp-memory"],
-      "env": {}
+      "type": "local",
+      "command": ["mcp-memory"]
     }
   }
 }
@@ -75,7 +69,7 @@ Use `uvx` in your MCP configuration:
 
 ## Architecture
 
-- `server.py` - FastMCP server with 22 tools
+- `server.py` - FastMCP server with 18 tools
 - `launcher.py` - Venv-aware launcher (creates `.venv` on first run)
 - `memory.py` - Memory classification & semantic search with lazy loading
 - `database.py` - SQLite3 backend with FTS5, transactions, and migrations
@@ -233,11 +227,10 @@ print(context)
 - `get_project_conventions()` - Get cached conventions for context
 - `suggest_correct_command()` - Suggest project-specific commands
 
-### Maintenance (4 tools)
+### Maintenance (3 tools)
 - `cleanup_old_data()` - Remove old low-importance memories
 - `optimize_memories()` - Merge duplicates, clean relationships
 - `remember_project_pattern()` - Store a reusable pattern
-- (2 more specialized tools)
 
 ## Configuration
 
@@ -286,23 +279,6 @@ IMPORTANCE_MODIFIERS = {
     'critical': 0.3,
     'security': 0.25,
     # ... more modifiers
-}
-```
-
-## OpenCode Integration
-
-Add to your `opencode.jsonc`:
-
-```jsonc
-{
-  "mcp": {
-    "mcp-memory": {
-      "type": "local",
-      "command": ["py", "mcp_memory/launcher.py"],
-      "cwd": "C:/Users/cbunt/.config/opencode/plugins/plugin-mcp-memory",
-      "enabled": true
-    }
-  }
 }
 ```
 
