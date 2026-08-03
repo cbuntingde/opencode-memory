@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-mcp-memory"
+version = "0.2.0"
+description = "Production-ready MCP memory server with semantic search, project conventions learning, and comprehensive memory management for OpenCode"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "OpenCode", email = "support@opencode.dev"}
+]
+keywords = ["mcp", "memory", "semantic-search", "llm", "context-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing",
+]
+dependencies = [
+    "fastmcp>=2.10.5",
+    "python-dotenv>=1.0.0",
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.21.0",
+    "scipy>=1.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/opencode/mcp-memory"
+Documentation = "https://github.com/opencode/mcp-memory#readme"
+Repository = "https://github.com/opencode/mcp-memory"
+Issues = "https://github.com/opencode/mcp-memory/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "flake8>=4.0.0",
+]
+
+[project.scripts]
+mcp-memory = "mcp_memory.launcher:main"
+
+[tool.setuptools]
+packages = ["mcp_memory"]
+
+[tool.setuptools.package-data]
+"mcp_memory" = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
