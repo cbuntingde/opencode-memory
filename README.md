@@ -16,15 +16,16 @@ A production-ready MCP (Model Context Protocol) memory server for OpenCode with 
 
 ## Quick Start
 
-The launcher automatically creates a `.venv` and installs dependencies on first run:
+After installation, run the server directly:
+
+```bash
+mcp-memory
+```
+
+Running from a source checkout without installing uses the launcher, which creates a `.venv` and installs dependencies on first run:
 
 ```bash
 python mcp_memory/launcher.py
-```
-
-Or use the console entry point (after installation):
-```bash
-mcp-memory
 ```
 
 ## Installation
@@ -70,7 +71,7 @@ Add the server to your opencode config (`opencode.json` or `opencode.jsonc`):
 ## Architecture
 
 - `server.py` - FastMCP server with 18 tools
-- `launcher.py` - Venv-aware launcher (creates `.venv` on first run)
+- `launcher.py` - Venv-aware launcher for running from source without installing
 - `memory.py` - Memory classification & semantic search with lazy loading
 - `database.py` - SQLite3 backend with FTS5, transactions, and migrations
 - `conventions.py` - Project type detection & command learning
