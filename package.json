@@ -1,0 +1,37 @@
+{
+  "name": "opencode-memory-local",
+  "version": "0.1.0",
+  "description": "Local-first persistent memory plugin for OpenCode with citation-backed facts and just-in-time verification.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "smoke": "bun run test/smoke.ts",
+    "spawn": "bun run test/no-console-flash.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test && bun run spawn && bun run smoke"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@opencode/plugin": "^2.0.21"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "memory",
+    "agent-memory",
+    "citations"
+  ]
+}

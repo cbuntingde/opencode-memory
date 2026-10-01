@@ -1,0 +1,11 @@
+node_modules/
+
+# Runtime memory produced by the plugin itself
+.opencode/memory/
+*.corrupt-*
+
+# Local research output
+mavis-deep-research/
+
+*.log
+.DS_Store
