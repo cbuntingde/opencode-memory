@@ -170,6 +170,64 @@ describe("MemoryStore CRUD", () => {
     expect(upgraded.list()[0]?.repoId).toBe("aaaabbbbcccc");
   });
 
+  test("creating a fresh store does not log a backfill failure", () => {
+    const warnings: string[] = [];
+    const root = makeWorkspace();
+    const store = makeStore(root, {
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: (message) => {
+          warnings.push(message);
+        },
+        error: () => {},
+      },
+    });
+
+    // The index does not exist yet, so opening it must not report the absent
+    // `memories` table as a failed backfill.
+    store.add({ subject: "fresh", fact: "first write on a new store", citations: ["a.ts"] });
+
+    expect(warnings).toEqual([]);
+    expect(store.count()).toBe(1);
+  });
+
+  test("legacy index without repo_id upgrades without warnings", () => {
+    const warnings: string[] = [];
+    const root = makeWorkspace();
+    const dir = join(root, "memory");
+    mkdirSync(dir, { recursive: true });
+
+    // A pre-upgrade index: the table exists, but the column does not.
+    const db = new Database(join(dir, "index.db"), { create: true });
+    db.run(`CREATE TABLE memories (
+      id TEXT PRIMARY KEY, scope TEXT NOT NULL, repo_key TEXT NOT NULL,
+      subject TEXT NOT NULL, fact TEXT NOT NULL, citations TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'learned-pattern',
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      last_validated_at INTEGER, use_count INTEGER NOT NULL DEFAULT 0,
+      expires_at INTEGER NOT NULL, needs_review INTEGER NOT NULL DEFAULT 0)`);
+    db.run(
+      `INSERT INTO memories (id, scope, repo_key, subject, fact, citations, created_at, updated_at, expires_at)
+       VALUES ('legacy-1','project','repo_test__abc123','legacy','old fact','["a.ts"]',1,1,9999999999999)`,
+    );
+    db.close();
+
+    const store = makeStore(root, {
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: (message) => {
+          warnings.push(message);
+        },
+        error: () => {},
+      },
+    });
+
+    expect(warnings).toEqual([]);
+    expect(store.count()).toBe(1);
+  });
+
   test("enforces the per-scope cap by dropping least-used records", () => {
     const root = makeWorkspace();
     const store = makeStore(root, { maxMemoriesPerScope: 10 });

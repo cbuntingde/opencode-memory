@@ -228,6 +228,7 @@ export class MemoryStore {
       attempt = new Database(this.indexPath, { create: true });
       this.migrate(attempt);
       execSql(attempt, SCHEMA);
+      this.backfillIdentity(attempt);
       this.db = attempt;
       if (!existed && existsSync(this.markdownPath)) {
         this.rebuildFromMarkdown();
@@ -251,6 +252,7 @@ export class MemoryStore {
     const db = new Database(this.indexPath, { create: true });
     this.migrate(db);
     execSql(db, SCHEMA);
+    this.backfillIdentity(db);
     this.db = db;
     try {
       this.rebuildFromMarkdown();
@@ -263,19 +265,33 @@ export class MemoryStore {
   }
 
   /**
-   * Brings an older index up to the current shape.
+   * Brings an older index up to the current column shape.
    *
-   * `repo_id` was added after the first release. Rows written before it carry
-   * only the display key, so their stable hash is backfilled from it - that alone
-   * rescues memories after a repository rename or a slug-rule change, which used
-   * to make an entire store silently unreachable.
+   * `repo_id` was added after the first release. This runs before `SCHEMA` on
+   * purpose: `idx_scope_repo_id` indexes that column, so on a pre-upgrade index
+   * the column has to exist before the index is created. The statement is
+   * expected to fail on a current or brand-new index, so failure is silent.
    */
   private migrate(db: Database): void {
     try {
       execSql(db, `ALTER TABLE memories ADD COLUMN repo_id TEXT NOT NULL DEFAULT ''`);
     } catch {
-      // Column already present on a current index.
+      // Column already present, or the table does not exist yet on a new index.
     }
+  }
+
+  /**
+   * Gives pre-`repo_id` rows a stable identity hash.
+   *
+   * Those rows carry only the display key, so their hash is derived from it -
+   * that alone rescues memories after a repository rename or a slug-rule change,
+   * which used to make an entire store silently unreachable.
+   *
+   * Runs after `SCHEMA`, so `memories` and its `repo_id` column are guaranteed to
+   * exist. Probing earlier made every fresh store log a bogus "identity backfill
+   * failed" warning for a table it was about to create.
+   */
+  private backfillIdentity(db: Database): void {
     try {
       const rows = all<{ id: string; repo_key: string }>(
         db.query(`SELECT id, repo_key FROM memories WHERE repo_id = '' OR repo_id IS NULL`),
