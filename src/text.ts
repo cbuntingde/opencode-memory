@@ -56,7 +56,6 @@ const STOPWORDS = new Set([
   "where",
   "which",
   "about",
-  "does",
   "get",
   "set",
   "let",

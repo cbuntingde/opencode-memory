@@ -113,4 +113,13 @@ describe("loadConfig layering", () => {
     const { config } = await loadConfig(globalDir, undefined, silentLogger);
     expect(config).toEqual(DEFAULT_CONFIG);
   });
+
+  test("a malformed config file warns instead of failing silently", async () => {
+    const globalDir = makeDir();
+    writeFileSync(join(globalDir, "memory.json"), "{ this is not json", "utf8");
+    const { config, warnings } = await loadConfig(globalDir, undefined, silentLogger);
+    expect(config).toEqual(DEFAULT_CONFIG);
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("could not be parsed");
+  });
 });

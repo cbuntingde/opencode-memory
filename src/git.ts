@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync, statSync, type Stats } from "node:fs";
+import { accessSync, constants, readFileSync, realpathSync, statSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /**
@@ -86,7 +86,7 @@ function gitConfigPath(directory: string): string | null {
 
   // Ordinary repository: .git is a directory holding config.
   if (stats.isDirectory()) {
-    return readConfigFile(join(dotGit, "config")) === null ? null : join(dotGit, "config");
+    return existsFile(join(dotGit, "config")) ? join(dotGit, "config") : null;
   }
 
   // Linked worktree or submodule: .git is a file holding `gitdir: <path>`.
@@ -94,7 +94,7 @@ function gitConfigPath(directory: string): string | null {
   const gitDir = readGitDirPointer(dotGit);
   if (!gitDir) return null;
   const config = join(gitDir, "config");
-  return readConfigFile(config) === null ? null : config;
+  return existsFile(config) ? config : null;
 }
 
 function readGitDirPointer(gitPath: string): string | null {
@@ -110,6 +110,16 @@ function readGitDirPointer(gitPath: string): string | null {
     return isAbsolute(target) ? target : resolve(dirname(gitPath), target);
   } catch {
     return null;
+  }
+}
+
+/** Readability probe so existence checks never load the file they are testing. */
+function existsFile(path: string): boolean {
+  try {
+    accessSync(path, constants.R_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
   }
 }
 

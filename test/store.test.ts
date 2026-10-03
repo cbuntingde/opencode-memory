@@ -348,4 +348,55 @@ describe("markdown mirror", () => {
     expect(rendered).toContain("# Memory (global)");
     expect(rendered).toContain("No memories stored yet");
   });
+
+  test("search honors the kind filter", () => {
+    const root = makeWorkspace();
+    const store = makeStore(root);
+    store.add({ subject: "s1", fact: "shared keyword alpha", citations: ["a.ts"], kind: "preference" });
+    store.add({ subject: "s2", fact: "shared keyword alpha", citations: ["b.ts"], kind: "architecture" });
+
+    const hits = store.search("shared keyword alpha", { kind: "preference" });
+    expect(hits.length).toBe(1);
+    expect(hits[0]?.kind).toBe("preference");
+  });
+
+  test("setNeedsReview is reflected in the Markdown mirror", () => {
+    const root = makeWorkspace();
+    const store = makeStore(root);
+    const record = store.add({ subject: "a", fact: "fa", citations: ["a.ts"] });
+
+    store.setNeedsReview(record.id, true);
+
+    expect(readFileSync(store.markdownPath, "utf8")).toContain("NeedsReview: true");
+  });
+
+  test("multi-line facts and reasons survive a Markdown rebuild", () => {
+    const root = makeWorkspace();
+    const first = makeStore(root);
+    const record = first.add({
+      subject: "Runbook",
+      fact: "Step one.\n- Note: check the dashboard first.\nStep two.",
+      citations: ["a.ts"],
+      reason: "Line one.\nLine two.",
+    });
+    first.close();
+
+    rmSync(first.indexPath, { force: true });
+    const rebuilt = makeStore(root);
+    expect(rebuilt.get(record.id)?.fact).toBe("Step one.\n- Note: check the dashboard first.\nStep two.");
+    expect(rebuilt.get(record.id)?.reason).toBe("Line one.\nLine two.");
+    expect(rebuilt.get(record.id)?.kind).toBe("learned-pattern");
+  });
+
+  test("rebuild from Markdown honors the configured expiry window", () => {
+    const root = makeWorkspace();
+    const first = makeStore(root, { expiryDays: 90 });
+    const record = first.add({ subject: "a", fact: "fa", citations: ["a.ts"] });
+    first.close();
+
+    rmSync(first.indexPath, { force: true });
+    const rebuilt = makeStore(root, { expiryDays: 90 });
+    const restored = rebuilt.get(record.id);
+    expect(restored?.expiresAt).toBeGreaterThan(restored!.updatedAt + 28 * DAY_MS);
+  });
 });

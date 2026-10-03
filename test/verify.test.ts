@@ -183,4 +183,43 @@ describe("verifyAndRecord", () => {
     expect(store.list().map((record) => record.id)).not.toContain(bad.id);
     expect(store.list({ includeReview: true }).length).toBe(2);
   });
+
+  test("partial entries keep living via touch, without a validation stamp", () => {
+    const root = makeRepo({ "src/version.ts": "export const API_VERSION = 'v2'\n" });
+    const store = new MemoryStore({
+      dir: join(root, "memory"),
+      scope: "project",
+      repoKey: "repo_test__abc",
+      expiryDays: 28,
+      maxMemoriesPerScope: 100,
+      logger: silentLogger,
+    });
+    openStores.push(store);
+
+    const drifted = store.add({
+      subject: "Drifted line",
+      fact: "The version constant moved",
+      citations: ["src/version.ts:900"],
+    });
+    const entries: VerifiedEntry[] = [
+      { record: drifted, result: verifyRecord(drifted, root, defaultVerifyDeps()) },
+    ];
+    expect(entries[0]!.result.state).toBe("partial");
+
+    verifyAndRecord(
+      entries,
+      (id, validated) => {
+        store.touch(id, validated);
+      },
+      (id, needsReview) => {
+        store.setNeedsReview(id, needsReview);
+      },
+    );
+
+    // Used but drifted: expiry extended, validation stamp untouched, still listed.
+    expect(store.get(drifted.id)?.useCount).toBe(1);
+    expect(store.get(drifted.id)?.lastValidatedAt).toBeNull();
+    expect(store.get(drifted.id)?.needsReview).toBe(false);
+    expect(store.list().map((record) => record.id)).toContain(drifted.id);
+  });
 });

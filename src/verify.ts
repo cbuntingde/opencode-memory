@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { resolveCitationPath } from "./scopes.ts";
 import { tokenOverlap, tokenize } from "./text.ts";
 import type { MemoryRecord, VerificationResult, CitationCheck } from "./types.ts";
@@ -36,17 +36,37 @@ export function defaultVerifyDeps(maxBytes = 512_000): VerifyDeps {
       try {
         const stats = statSync(absPath);
         if (!stats.isFile()) return undefined;
-        // Binary detection keeps us from loading images or bundles as text.
-        if (stats.size > maxBytes) {
-          const handle = readFileSync(absPath);
-          if (handle.includes(0)) return undefined;
-        }
+        // Binary detection keeps us from loading images or bundles as text. The
+        // probe reads a head chunk only, so an oversize file is never loaded
+        // twice just to decide it is binary.
+        if (stats.size > maxBytes && isBinaryFile(absPath)) return undefined;
         return readFileSync(absPath, "utf8");
       } catch {
         return undefined;
       }
     },
   };
+}
+
+/** NUL probe over the first bytes; failures read as binary (fail closed). */
+function isBinaryFile(absPath: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(absPath, "r");
+    const head = Buffer.alloc(8192);
+    const read = readSync(fd, head, 0, head.length, 0);
+    return head.subarray(0, read).includes(0);
+  } catch {
+    return true;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* descriptor already gone */
+      }
+    }
+  }
 }
 
 export function verifyRecord(
@@ -117,8 +137,9 @@ export interface VerifiedEntry {
 
 /**
  * Verifies a batch and persists the outcome: valid records have their
- * last-validated timestamp and expiry refreshed, invalid ones are flagged so
- * they stop being offered to the model.
+ * last-validated timestamp and expiry refreshed, partial ones have their expiry
+ * refreshed without the stamp, and invalid ones are flagged so they stop being
+ * offered to the model.
  */
 export function verifyAndRecord(
   entries: VerifiedEntry[],
@@ -131,7 +152,9 @@ export function verifyAndRecord(
       continue;
     }
     flag(record.id, false);
-    if (result.state === "valid") touch(record.id, true);
+    // Partial memories are still in use, so their expiry is extended; only the
+    // validation stamp stays reserved for fully confirmed citations.
+    touch(record.id, result.state === "valid");
   }
 }
 

@@ -32,6 +32,11 @@ describe("parseCitation", () => {
     expect(parseCitation("src/app.ts:0")).toEqual({ path: "src/app.ts" });
     expect(parseCitation({ path: "a.ts", line: -2 })).toEqual({ path: "a.ts" });
   });
+
+  test("rejects parent-directory escapes", () => {
+    expect(parseCitation("../../.ssh/id_rsa")).toBeNull();
+    expect(parseCitation("src/../../etc/passwd:1")).toBeNull();
+  });
 });
 
 describe("parseCitations", () => {
@@ -110,5 +115,13 @@ describe("redact", () => {
   test("does not corrupt ordinary prose", () => {
     const text = "The build command is `bun run build` and tests use vitest.";
     expect(redact(text).text).toBe(text);
+  });
+
+  test("redacts an unclosed private block to the end of input", () => {
+    const result = redact("public <private>my secret");
+    expect(result.redacted).toBe(true);
+    expect(result.text).not.toContain("my secret");
+    expect(result.text).toContain("public");
+    expect(result.rules).toContain("private-block");
   });
 });

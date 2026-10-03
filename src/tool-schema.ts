@@ -1,4 +1,3 @@
-import type { JsonSchema } from "effect";
 import { MEMORY_KINDS, SCOPES } from "./types.ts";
 
 /**
@@ -22,7 +21,16 @@ export const TOOL_NAMES = [
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-type Json = JsonSchema.JsonSchema;
+/** Minimal JSON Schema shape for tool inputs; local so no schema library is needed. */
+type Json = {
+  type?: string;
+  description?: string;
+  properties?: Record<string, Json>;
+  required?: readonly string[];
+  additionalProperties?: boolean;
+  enum?: readonly string[];
+  items?: Json;
+};
 
 const scopeWithAll = [...SCOPES, "all"] as unknown as [string, ...string[]];
 const scopeOnly = [...SCOPES] as unknown as [string, ...string[]];
@@ -140,12 +148,14 @@ export const TOOL_SPECS: Record<ToolName, ToolSpec> = {
       scope: "Default: project.",
       limit: "Maximum entries (default 20).",
       kind: "Filter by kind.",
+      includeReview: "Include facts flagged for review (default false).",
     },
     json: schema(
       {
         scope: str("Default: project.", scopeWithAll),
         limit: num("Maximum entries (default 20)."),
         kind: str("Filter by kind.", kinds),
+        includeReview: bool("Include facts flagged for review (default false)."),
       },
       [],
     ),

@@ -383,6 +383,44 @@ describe("durability and isolation", () => {
     expect(listed).toContain("No memory stored");
   });
 
+  test("memory_list with includeReview surfaces flagged facts", async () => {
+    const repo = makeRepo({ "src/x.ts": "export const x = 1\n" });
+    const { worktree, sessionID } = await harness(repo);
+
+    await callTool(worktree, sessionID, "memory_add", {
+      subject: "Doomed fact",
+      fact: "Config lives in src/gone.ts",
+      citations: ["src/gone.ts:1"],
+    });
+    // Injection verifies and flags the fact whose citation is gone.
+    await transform("ses_flag");
+
+    const hidden = await callTool(worktree, sessionID, "memory_list", { scope: "project" });
+    expect(hidden).toContain("No memory stored");
+    const shown = await callTool(worktree, sessionID, "memory_list", { scope: "project", includeReview: true });
+    expect(shown).toContain("Doomed fact");
+    expect(shown).toContain("needs review");
+  });
+
+  test("auto-saved citations are stored repo-relative", async () => {
+    const repo = makeRepo({ "src/app.ts": "export const app = 1\n" });
+    const { worktree, sessionID } = await harness(repo);
+
+    const abs = join(worktree, "src/app.ts");
+    for (let i = 0; i < 2; i += 1) {
+      await hooks?.["tool.execute.after"]?.(
+        { tool: "edit", sessionID, callID: `r${i}`, args: { filePath: abs } } as never,
+        { title: "", output: "", metadata: {} } as never,
+      );
+    }
+    await emitEvent("session.idle", { sessionID });
+    await emitEvent("session.idle", { sessionID });
+    await emitEvent("session.idle", { sessionID });
+
+    const listed = await callTool(worktree, sessionID, "memory_list", { scope: "project" });
+    expect(listed).toContain("cites: src/app.ts");
+  });
+
   test("the Markdown mirror exists for both scopes", async () => {
     const repo = makeRepo({ "src/x.ts": "export const x = 1\n" });
     const { worktree, globalDir, sessionID } = await harness(repo);

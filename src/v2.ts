@@ -5,6 +5,7 @@ import { loadConfig } from "./config.ts";
 import { MemoryHub, defaultGlobalDir, sessionStoreFor } from "./hub.ts";
 import { createLogger } from "./logger.ts";
 import { safeText } from "./redact.ts";
+import { toRepoRelative } from "./scopes.ts";
 import { MemoryService } from "./service.ts";
 import { truncateChars } from "./text.ts";
 import { TOOL_NAMES, TOOL_SPECS } from "./tool-schema.ts";
@@ -43,7 +44,7 @@ export const memoryPluginV2 = Plugin.define({
   id: "opencode-memory",
 
   async setup(ctx) {
-    const logger = createLogger(undefined);
+    const logger = createLogger((ctx as unknown as { client?: unknown }).client);
     const worktree = String(ctx.location.project.canonical ?? ctx.location.directory);
     const globalDir = defaultGlobalDir();
 
@@ -125,6 +126,8 @@ export const memoryPluginV2 = Plugin.define({
       if (config.autoSaveRepeatedEdits) {
         const draft = buildAutoSave(candidate);
         if (draft) {
+          // Tool args may carry absolute paths; the store keeps repo-relative ones.
+          draft.citations = draft.citations.map((citation) => toRepoRelative(citation, worktree));
           try {
             const record = context.project.add(draft);
             context.injector.invalidate();
@@ -250,8 +253,6 @@ export const memoryPluginV2 = Plugin.define({
           error: error instanceof Error ? error.message : String(error),
         });
       }
-
-      await storeCompactionSummary(String(event.sessionID));
     });
 
     // --- events ------------------------------------------------------------
@@ -270,6 +271,7 @@ export const memoryPluginV2 = Plugin.define({
 
           if (type === "session.idle" && sessionID) await onTurnIdle(sessionID);
           else if (type === "session.created") hub.sweepAll();
+          else if (type === "session.compacted" && sessionID) await storeCompactionSummary(sessionID);
           else if (type === "session.deleted" && sessionID) hub.releaseSession(worktree, sessionID);
         }
       } catch (error) {

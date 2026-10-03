@@ -83,6 +83,8 @@ export class MemoryService {
     const limit = clamp(call.args["limit"], 8, 1, 50);
 
     const blocks: string[] = [];
+    const scopeNote = describeScopeFallback(call.args["scope"], requested);
+    if (scopeNote) blocks.push(scopeNote);
     let total = 0;
 
     for (const scope of requested) {
@@ -105,7 +107,8 @@ export class MemoryService {
     }
 
     if (total === 0) {
-      return `No stored fact matches "${truncateChars(query, 120)}" in ${requested.join(" + ")}. Nothing is known yet - read the code instead of assuming.`;
+      const prefix = scopeNote ? `${scopeNote}\n` : "";
+      return `${prefix}No stored fact matches "${truncateChars(query, 120)}" in ${requested.join(" + ")}. Nothing is known yet - read the code instead of assuming.`;
     }
     return `Recalled ${total} fact(s) for "${truncateChars(query, 120)}":\n\n${blocks.join("\n").trim()}`;
   }
@@ -123,11 +126,15 @@ export class MemoryService {
 
     if (!fact) return "Nothing stored: `fact` was empty after redaction.";
     if (citations.length === 0 && scope !== "session") {
-      return [
+      const lines = [
         "Nothing stored: at least one citation is required for global and project scope.",
         'Re-run with the file and line that prove the fact, e.g. citations: ["src/build.ts:18"].',
         "Session scope may be stored without citations.",
-      ].join("\n");
+      ];
+      if (mentionsDotenv(call.args["citations"])) {
+        lines.push("Note: dotenv paths (.env) cannot be cited; cite the code that reads the value instead.");
+      }
+      return lines.join("\n");
     }
 
     const store = this.storeFor(context, scope, sessionID);
@@ -157,6 +164,8 @@ export class MemoryService {
     const limit = clamp(call.args["limit"], 10, 1, 50);
 
     const out: string[] = [];
+    const scopeNote = describeScopeFallback(call.args["scope"], scopes);
+    if (scopeNote) out.push(scopeNote);
     for (const scope of scopes) {
       const store = resolveScopeStore(context, scope, sessionID, this.hub.config);
       if (!store) continue;
@@ -174,13 +183,16 @@ export class MemoryService {
     const scopes = this.scopesFrom(call.args["scope"], ["project", "global", "session"]);
     const limit = clamp(call.args["limit"], 20, 1, 200);
     const kind = isMemoryKind(call.args["kind"]) ? (call.args["kind"] as MemoryKind) : undefined;
+    const includeReview = call.args["includeReview"] === true;
 
     const out: string[] = [];
+    const scopeNote = describeScopeFallback(call.args["scope"], scopes);
+    if (scopeNote) out.push(scopeNote);
     let total = 0;
     for (const scope of scopes) {
       const store = resolveScopeStore(context, scope, sessionID, this.hub.config);
       if (!store) continue;
-      const records = store.list({ limit, ...(kind ? { kind } : {}) });
+      const records = store.list({ limit, includeReview, ...(kind ? { kind } : {}) });
       total += records.length;
       out.push(`## ${scope} scope — ${records.length} entr${records.length === 1 ? "y" : "ies"}`);
       for (const record of records) {
@@ -193,7 +205,8 @@ export class MemoryService {
       out.push("");
     }
     if (total === 0) {
-      return `No memory stored (scopes: ${scopes.join(", ")}). Record one with memory_add.`;
+      const prefix = scopeNote ? `${scopeNote}\n` : "";
+      return `${prefix}No memory stored (scopes: ${scopes.join(", ")}). Record one with memory_add.`;
     }
     return out.join("\n").trim();
   }
@@ -304,6 +317,18 @@ export class MemoryService {
 
 function isScopeValue(value: unknown): boolean {
   return typeof value === "string" && (SCOPES as readonly string[]).includes(value);
+}
+
+/** Names an unknown scope that fell back to the defaults, so typos stay visible. */
+function describeScopeFallback(raw: unknown, resolved: Scope[]): string | undefined {
+  if (!raw || raw === "all" || isScopeValue(raw)) return undefined;
+  return `Unknown scope "${String(raw)}"; showing ${resolved.join(" + ")} instead.`;
+}
+
+/** True when the caller tried to cite a dotenv path, which is always rejected. */
+function mentionsDotenv(raw: unknown): boolean {
+  const values = Array.isArray(raw) ? raw : [raw];
+  return values.some((value) => typeof value === "string" && /(^|\/)\.env(\.|$|\/)/i.test(value));
 }
 
 function clamp(value: unknown, fallback: number, min: number, max: number): number {

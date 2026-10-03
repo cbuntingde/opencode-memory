@@ -5,6 +5,7 @@ import { loadConfig } from "./config.ts";
 import { MemoryHub, defaultGlobalDir } from "./hub.ts";
 import { createLogger } from "./logger.ts";
 import { safeText } from "./redact.ts";
+import { toRepoRelative } from "./scopes.ts";
 import { truncateChars } from "./text.ts";
 import { createMemoryTools } from "./tools.ts";
 import type { MemoryConfig } from "./types.ts";
@@ -105,6 +106,8 @@ export const MemoryPlugin: Plugin = async (input, options) => {
     if (config.autoSaveRepeatedEdits) {
       const draft = buildAutoSave(candidate);
       if (draft) {
+        // Tool args may carry absolute paths; the store keeps repo-relative ones.
+        draft.citations = draft.citations.map((citation) => toRepoRelative(citation, worktree));
         try {
           const record = context.project.add(draft);
           context.injector.invalidate();

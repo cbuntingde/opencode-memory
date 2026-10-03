@@ -92,5 +92,7 @@ function normalizeCitationPath(raw: string): string | null {
   if (!value) return null;
   // Reject obvious placeholder / private paths outright.
   if (/(^|\/)\.env(\.|$)/i.test(value)) return null;
+  // No parent escapes: a citation must stay inside the worktree it is read from.
+  if (value.split("/").includes("..")) return null;
   return value;
 }

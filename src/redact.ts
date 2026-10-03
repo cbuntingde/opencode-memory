@@ -114,6 +114,14 @@ export function redact(input: string, enabled = true): RedactionResult {
     return REDACTED_PRIVATE;
   });
 
+  // An opener with no closer after it (including the marker just written above,
+  // which always has one) still marks intent: redact to the end of input
+  // rather than leaking whatever was meant to stay private.
+  text = text.replace(/<private>(?![\s\S]*<\/private>)[\s\S]*$/i, () => {
+    fired.add("private-block");
+    return REDACTED_PRIVATE;
+  });
+
   for (const rule of SECRET_RULES) {
     // A fresh lastIndex per pass keeps the shared module-level patterns stateless.
     rule.pattern.lastIndex = 0;

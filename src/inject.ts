@@ -67,13 +67,15 @@ export function renderBlock(options: {
   repoKey: string;
   budgetChars: number;
   withheld: number;
+  today?: string;
 }): string {
   const { profile, project, session = [], repoKey, budgetChars, withheld } = options;
+  const today = options.today ?? isoDate(Date.now());
   // A block is still worth emitting when everything was withheld: the agent needs
   // to know its stored knowledge went stale rather than silently losing it.
   if (profile.length === 0 && project.length === 0 && session.length === 0 && withheld === 0) return "";
 
-  const lines: string[] = ["", "[MEMORY] verified persistent context (checked " + isoDate(Date.now()) + "):", ""];
+  const lines: string[] = ["", "[MEMORY] verified persistent context (checked " + today + "):", ""];
 
   if (profile.length > 0) {
     lines.push(`- User preferences (${profile.length}):`);
@@ -129,6 +131,7 @@ export class Injector {
   private readonly recorded = new Set<string>();
   private readonly usedPerSession = new Map<string, Set<string>>();
   private readonly statsBySession = new Map<string, InjectStats>();
+  private readonly totals: InjectStats = { recalled: 0, saved: 0, verified: 0, partial: 0, withheld: 0 };
   private lastActivity: InjectStats["lastActivity"];
 
   constructor(deps: InjectDeps) {
@@ -139,12 +142,11 @@ export class Injector {
   }
 
   get stats(): InjectStats {
-    return { ...this.currentStats(), lastActivity: this.lastActivity };
+    return { ...this.totals, lastActivity: this.lastActivity };
   }
 
   noteSave(): void {
-    const stats = this.currentStats();
-    stats.saved += 1;
+    this.totals.saved += 1;
     this.lastActivity = { kind: "save", at: this.now() };
   }
 
@@ -176,13 +178,17 @@ export class Injector {
     const projectCandidates = projectStore.recent(config.maxMemoriesPerInject * 3);
     const sessionCandidates = sessionStore ? sessionStore.recent(3) : [];
 
+    const withheldBefore = stats.withheld;
     const profileEntries = this.select(profileCandidates, worktree, config, "preference", seen, stats);
     const projectEntries = this.select(projectCandidates, worktree, config, null, seen, stats);
     // Session notes were written moments ago by this same process, so citation
     // verification is skipped rather than allowed to withhold the model's own notes.
     const sessionEntries = sessionCandidates.map((record) => ({ record, state: "valid" as const }));
+    // The block reports this build only: a stale cumulative count would claim
+    // facts are being withheld long after they stopped being offered.
+    const withheldThisBuild = stats.withheld - withheldBefore;
 
-    if (profileEntries.length === 0 && projectEntries.length === 0 && sessionEntries.length === 0 && stats.withheld === 0) {
+    if (profileEntries.length === 0 && projectEntries.length === 0 && sessionEntries.length === 0 && withheldThisBuild === 0) {
       const result: BuildResult = { block: "", ids: [], stats };
       this.cache.set(sessionID, { at: this.now(), key: revisionKey, result });
       return result;
@@ -221,7 +227,8 @@ export class Injector {
       session: trimmedSession,
       repoKey: projectStore.repo,
       budgetChars: totalBudget,
-      withheld: stats.withheld,
+      withheld: withheldThisBuild,
+      today: isoDate(this.now()),
     });
 
     const ids = [...trimmedProfile, ...trimmedProject, ...trimmedSession].map((entry) => entry.record.id);
@@ -230,14 +237,19 @@ export class Injector {
     const result: BuildResult = { block, ids, stats };
     this.cache.set(sessionID, { at: this.now(), key: revisionKey, result });
     stats.recalled += ids.length;
+    this.totals.recalled += ids.length;
     this.lastActivity = { kind: "recall", at: this.now() };
     return result;
   }
 
-  private currentStats(sessionID?: string): InjectStats {
-    if (!sessionID) {
-      return { recalled: 0, saved: 0, verified: 0, partial: 0, withheld: 0 };
-    }
+  /** Drops a session's cached block, dedup set and counters. */
+  releaseSession(sessionID: string): void {
+    this.cache.delete(sessionID);
+    this.usedPerSession.delete(sessionID);
+    this.statsBySession.delete(sessionID);
+  }
+
+  private currentStats(sessionID: string): InjectStats {
     const existing = this.statsBySession.get(sessionID);
     if (existing) return existing;
     const created: InjectStats = { recalled: 0, saved: 0, verified: 0, partial: 0, withheld: 0 };
@@ -267,12 +279,15 @@ export class Injector {
 
       if (result.state === "invalid") {
         stats.withheld += 1;
+        this.totals.withheld += 1;
         continue;
       }
       if (result.state === "partial") {
         stats.partial += 1;
+        this.totals.partial += 1;
       } else {
         stats.verified += 1;
+        this.totals.verified += 1;
       }
       pending.push({ record, state: result.state === "valid" ? "valid" : "partial" });
     }

@@ -371,7 +371,10 @@ export class MemoryStore {
   }
 
   get(id: string): MemoryRecord | null {
-    const row = get<Row>(this.connect().query(`SELECT * FROM memories WHERE id = ?`), [id]);
+    const row = get<Row>(
+      this.connect().query(`SELECT * FROM memories WHERE id = ? AND scope = ? AND ${this.identityClause}`),
+      [id, this.scope, ...this.identityParams],
+    );
     return row ? fromRow(row) : null;
   }
 
@@ -413,12 +416,19 @@ export class MemoryStore {
 
     if (tokens.length === 0) return this.list(options);
 
+    const clauses = [`scope = ?`, this.identityClause, `needs_review = 0`];
+    const params: Array<string | number> = [this.scope, ...this.identityParams];
+    if (options.kind) {
+      clauses.push("kind = ?");
+      params.push(options.kind);
+    }
+    params.push(candidateLimit);
+
     const rows = all<Row>(
       this.connect().query(
-        `SELECT * FROM memories WHERE scope = ? AND ${this.identityClause} AND needs_review = 0
-         ORDER BY updated_at DESC LIMIT ?`,
+        `SELECT * FROM memories WHERE ${clauses.join(" AND ")} ORDER BY updated_at DESC LIMIT ?`,
       ),
-      [this.scope, ...this.identityParams, candidateLimit],
+      params,
     );
 
     const tokenSet = new Set(tokens);
@@ -441,7 +451,10 @@ export class MemoryStore {
   }
 
   forget(id: string): boolean {
-    const changes = exec(this.connect().query(`DELETE FROM memories WHERE id = ? AND scope = ?`), [id, this.scope]);
+    const changes = exec(
+      this.connect().query(`DELETE FROM memories WHERE id = ? AND scope = ? AND ${this.identityClause}`),
+      [id, this.scope, ...this.identityParams],
+    );
     if (changes > 0) {
       this.revision += 1;
       this.writeMarkdown();
@@ -454,8 +467,13 @@ export class MemoryStore {
   private deleteIds(ids: string[]): void {
     if (ids.length === 0) return;
     const placeholders = ids.map(() => "?").join(",");
-    exec(this.connect().query(`DELETE FROM memories WHERE id IN (${placeholders}) AND scope = ?`), [...ids, this.scope]);
-    this.revision += 1;
+    const changes = exec(
+      this.connect().query(
+        `DELETE FROM memories WHERE id IN (${placeholders}) AND scope = ? AND ${this.identityClause}`,
+      ),
+      [...ids, this.scope, ...this.identityParams],
+    );
+    if (changes > 0) this.revision += 1;
   }
 
   forgetAll(): number {
@@ -475,12 +493,12 @@ export class MemoryStore {
     const now = this.now();
     const sql = validated
       ? `UPDATE memories SET use_count = use_count + 1, last_validated_at = ?, expires_at = ?, needs_review = 0
-         WHERE id = ? AND scope = ?`
+         WHERE id = ? AND scope = ? AND ${this.identityClause}`
       : `UPDATE memories SET use_count = use_count + 1, expires_at = ?
-         WHERE id = ? AND scope = ?`;
+         WHERE id = ? AND scope = ? AND ${this.identityClause}`;
     const changes = validated
-      ? exec(this.connect().query(sql), [now, now + this.expiryDays * DAY_MS, id, this.scope])
-      : exec(this.connect().query(sql), [now + this.expiryDays * DAY_MS, id, this.scope]);
+      ? exec(this.connect().query(sql), [now, now + this.expiryDays * DAY_MS, id, this.scope, ...this.identityParams])
+      : exec(this.connect().query(sql), [now + this.expiryDays * DAY_MS, id, this.scope, ...this.identityParams]);
     if (changes > 0) {
       this.revision += 1;
       this.writeMarkdown();
@@ -491,18 +509,23 @@ export class MemoryStore {
 
   setNeedsReview(id: string, needsReview: boolean): void {
     const changes = exec(
-      this.connect().query(`UPDATE memories SET needs_review = ? WHERE id = ? AND scope = ?`),
-      [needsReview ? 1 : 0, id, this.scope],
+      this.connect().query(`UPDATE memories SET needs_review = ? WHERE id = ? AND scope = ? AND ${this.identityClause}`),
+      [needsReview ? 1 : 0, id, this.scope, ...this.identityParams],
     );
-    if (changes > 0) this.revision += 1;
+    if (changes > 0) {
+      this.revision += 1;
+      this.writeMarkdown();
+    }
   }
 
   /** Drops unused records past their expiry. Verified/used records keep living. */
   sweepExpired(): number {
     const now = this.now();
     const changes = exec(
-      this.connect().query(`DELETE FROM memories WHERE expires_at < ? AND use_count = 0 AND scope = ?`),
-      [now, this.scope],
+      this.connect().query(
+        `DELETE FROM memories WHERE expires_at < ? AND use_count = 0 AND scope = ? AND ${this.identityClause}`,
+      ),
+      [now, this.scope, ...this.identityParams],
     );
     if (changes > 0) {
       this.revision += 1;
@@ -580,10 +603,10 @@ export class MemoryStore {
   private trim(): void {
     const rows = all<{ id: string }>(
       this.connect().query(
-        `SELECT id FROM memories WHERE scope = ? AND repo_key = ?
+        `SELECT id FROM memories WHERE scope = ? AND ${this.identityClause}
          ORDER BY use_count ASC, updated_at ASC`,
       ),
-      [this.scope, this.repoKey],
+      [this.scope, ...this.identityParams],
     );
     const excess = rows.length - this.maxMemories;
     if (excess > 0) {
@@ -633,7 +656,7 @@ export class MemoryStore {
         record.updatedAt,
         record.lastValidatedAt,
         record.useCount,
-        record.expiresAt,
+        restoredExpiry(record, this.expiryDays),
         record.needsReview ? 1 : 0,
       ]);
       restored += 1;
@@ -686,6 +709,73 @@ function safeParse(input: string): unknown {
   }
 }
 
+/**
+ * Indents continuation lines of a multi-line value.
+ *
+ * A fact may legitimately span several lines. Written naively, a line such as
+ * `- Note: x` inside the fact would be parsed back as a field and silently
+ * truncate the fact on rebuild - the recovery path would then destroy the very
+ * data it was meant to restore. Indenting continuation lines keeps them part of
+ * the value while still looking like prose to a human editing the file.
+ */
+function indentContinuation(value: string): string {
+  if (!value.includes("\n")) return value;
+  return value
+    .split("\n")
+    .map((line, index) => (index === 0 ? line : line.length > 0 ? `  ${line}` : ""))
+    .join("\n");
+}
+
+/** Reverses indentContinuation for one continuation line. */
+function unindentContinuation(line: string): string {
+  return line.startsWith("  ") ? line.slice(2) : line;
+}
+
+/**
+ * Reads `- Field: value` pairs, joining continuation lines into the current field.
+ *
+ * Any line that is not itself a field belongs to the most recent field, blank
+ * lines included. This is what makes multi-line facts round-trip exactly;
+ * rendered fields are always consecutive, so a blank line can only come from a
+ * multi-line value (or the block end, where it lands on NeedsReview and is
+ * trimmed back off at the use site).
+ */
+function collectFields(lines: string[]): Map<string, string> {
+  const fields = new Map<string, string>();
+  let current: string | undefined;
+
+  for (const line of lines) {
+    // Only an unindented line can start a field: rendered continuation lines
+    // are indented precisely so a `- Note: ...` inside a fact stays data.
+    const match = /^\s/.test(line) ? null : FIELD_LINE.exec(line.trim());
+    if (match) {
+      current = (match[1] as string).toLowerCase();
+      const value = (match[2] ?? "").trim();
+      fields.set(current, fields.has(current) ? `${fields.get(current)}\n${value}` : value);
+      continue;
+    }
+    if (current === undefined) continue;
+    if (line.trim().length === 0) {
+      fields.set(current, `${fields.get(current) ?? ""}\n`);
+      continue;
+    }
+    fields.set(current, `${fields.get(current) ?? ""}\n${unindentContinuation(line)}`);
+  }
+
+  return fields;
+}
+
+/**
+ * Expiry for a record restored from Markdown.
+ *
+ * The mirror stores dates only, so the original expiry is gone; recomputing it
+ * from the configured window keeps a store configured for long retention from
+ * being rebuilt with a short one and then swept away.
+ */
+function restoredExpiry(record: MemoryRecord, expiryDays: number): number {
+  return Math.max(record.expiresAt, record.updatedAt + expiryDays * DAY_MS);
+}
+
 export function renderMarkdown(records: MemoryRecord[], scope: Scope, repoKey: string, repoId?: string): string {
   const identity = repoId ?? hashFromProjectKey(repoKey);
   const header = [
@@ -707,9 +797,9 @@ export function renderMarkdown(records: MemoryRecord[], scope: Scope, repoKey: s
       const date = (value: number | null): string => (value ? new Date(value).toISOString().slice(0, 10) : "unknown");
       return [
         `## [${record.id}] ${record.subject}`,
-        `- Fact: ${record.fact}`,
+        `- Fact: ${indentContinuation(record.fact)}`,
         `- Citations: ${citations}`,
-        `- Reason: ${record.reason || "-"}`,
+        `- Reason: ${indentContinuation(record.reason) || "-"}`,
         `- Kind: ${record.kind}`,
         `- Scope: ${record.scope}`,
         `- Repo: ${record.repoKey}`,
@@ -758,11 +848,7 @@ export function parseMarkdown(raw: string, scope: Scope = "project", repoKey = "
     if (!id.startsWith("m_")) continue;
     const subject = (idMatch[2] ?? "").trim();
 
-    const fields = new Map<string, string>();
-    for (const line of lines.slice(1)) {
-      const match = FIELD_LINE.exec(line.trim());
-      if (match) fields.set((match[1] as string).toLowerCase(), (match[2] ?? "").trim());
-    }
+    const fields = collectFields(lines.slice(1));
 
     const fact = fields.get("fact") ?? "";
     if (!fact) continue;

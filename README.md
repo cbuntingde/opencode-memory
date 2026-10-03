@@ -137,10 +137,11 @@ The package default-exports both generations, so one install works on OpenCode v
 | --- | --- | --- |
 | `memory_recall` | yes | Search all scopes; reports verification state per fact |
 | `memory_search` | yes | Keyword search with citations |
-| `memory_list` | yes | List a scope, with validation dates and review flags |
+| `memory_list` | yes | List a scope, with validation dates and review flags (`includeReview: true` shows flagged facts) |
 | `memory_profile` | yes | User-wide preferences that follow you across projects |
 | `memory_add` | no | Record one fact. **Requires ≥1 citation** outside session scope |
 | `memory_forget` | no | Delete one fact by id, or `all: true` to clear a scope |
+| `memory_rebind` | no | List or adopt memories stored under a different project identity |
 
 ### Permissions
 
@@ -154,7 +155,8 @@ Reads are safe to auto-approve; writes should not be:
     { "action": "memory_list", "resource": "*", "effect": "allow" },
     { "action": "memory_profile", "resource": "*", "effect": "allow" },
     { "action": "memory_add", "resource": "*", "effect": "ask" },
-    { "action": "memory_forget", "resource": "*", "effect": "ask" }
+    { "action": "memory_forget", "resource": "*", "effect": "ask" },
+    { "action": "memory_rebind", "resource": "*", "effect": "ask" }
   ]
 }
 ```
@@ -211,8 +213,9 @@ rather than breaking the session.
 
 ## Privacy
 
-- **Redaction runs before every write.** `<private>…</private>` blocks, AWS keys,
-  GitHub tokens, OpenAI/Anthropic/Google keys, Slack tokens, JWTs, PEM blocks,
+- **Redaction runs before every write.** `<private>…</private>` blocks (an opener
+  without a closer redacts to end of input), AWS keys, GitHub tokens and PATs,
+  OpenAI/Anthropic/Google keys, Slack tokens, JWTs, PEM blocks,
   bearer headers and `KEY=value` env lines are all masked. The key name is kept
   so the line stays legible.
 - **`.env` cannot be cited.** Citation parsing rejects dotenv paths outright.
@@ -230,10 +233,10 @@ A corrupted `index.db` is renamed aside and rebuilt from Markdown.
 
 ```bash
 bun install
-bun test          # 98 unit + integration tests
+bun test          # 118 unit + integration tests
 bun run smoke     # end-to-end through both plugin generations, on real files
 bun run typecheck
-bun run check     # typecheck + tests
+bun run check     # typecheck + tests + spawn guard + smoke
 ```
 
 Layout:

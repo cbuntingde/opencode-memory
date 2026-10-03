@@ -156,8 +156,12 @@ export async function loadConfig(
         }
         merged = { ...merged, ...(parsed as Record<string, unknown>) };
         sources.push(path);
-      } catch {
-        // Missing file is the normal case; only report unexpected parse issues.
+      } catch (error) {
+        // Missing file is the normal case and stays silent; an unreadable or
+        // malformed file warns so a broken config never looks intentional.
+        if (isMissingFile(error)) continue;
+        // Logged with the other warnings below, once validation has run.
+        warnings.push(`${layer.label} config ${path} could not be parsed; using defaults`);
       }
     }
   }
@@ -168,6 +172,15 @@ export async function loadConfig(
   }
 
   return { config, sources, warnings: validationWarnings };
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 export function validateConfig(

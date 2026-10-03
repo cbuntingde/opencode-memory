@@ -2,7 +2,7 @@ import { CaptureQueue } from "./capture.ts";
 import { Injector } from "./inject.ts";
 import { SessionStore } from "./session-store.ts";
 import { MemoryStore, generateMemoryId } from "./store.ts";
-import { cachedGitProbe, type GitProbe } from "./git.ts";
+import { cachedGitProbe, safeRealpath, type GitProbe } from "./git.ts";
 import { GLOBAL_REPO_ID, resolveScopes, type ScopeResolution } from "./scopes.ts";
 import type { VerifyDeps } from "./verify.ts";
 import type { Logger, MemoryConfig, Scope } from "./types.ts";
@@ -84,6 +84,7 @@ export class MemoryHub {
   private readonly cacheTtlMs: number | undefined;
   private readonly contexts = new Map<string, WorktreeContext>();
   private readonly reportedUnreachable = new Set<string>();
+  private sharedGlobal: MemoryStore | null = null;
 
   constructor(options: HubOptions) {
     this.config = options.config;
@@ -97,7 +98,9 @@ export class MemoryHub {
   }
 
   contextFor(worktree: string): WorktreeContext {
-    const key = worktree;
+    // Canonical key: two spellings of one directory must not open two
+    // independent handles on the same index.db files.
+    const key = safeRealpath(worktree);
     const existing = this.contexts.get(key);
     if (existing) return existing;
 
@@ -116,7 +119,11 @@ export class MemoryHub {
         ...(this.generateId ? { generateId: this.generateId } : {}),
       });
 
-    const global = makeStore(join(this.globalDir, "memory"), "global", "user", GLOBAL_REPO_ID);
+    // One global store for the process: every worktree reads the same file.
+    if (!this.sharedGlobal) {
+      this.sharedGlobal = makeStore(join(this.globalDir, "memory"), "global", "user", GLOBAL_REPO_ID);
+    }
+    const global = this.sharedGlobal;
     const project = makeStore(scopes.projectDir, "project", scopes.repoKey, scopes.repoId);
 
     const injector = new Injector({
@@ -183,9 +190,18 @@ export class MemoryHub {
   /** Expires unused memories across every store touched this process. */
   sweepAll(): number {
     let removed = 0;
+    // The global store is shared, so it is swept once rather than per worktree.
+    if (this.sharedGlobal) {
+      try {
+        removed += this.sharedGlobal.sweepExpired();
+      } catch (error) {
+        this.logger.warn("expiry sweep failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     for (const context of this.contexts.values()) {
       try {
-        removed += context.global.sweepExpired();
         removed += context.project.sweepExpired();
       } catch (error) {
         this.logger.warn("expiry sweep failed", {
@@ -200,9 +216,14 @@ export class MemoryHub {
     let global = 0;
     let project = 0;
     let sessions = 0;
+    let globalCounted = false;
     for (const context of this.contexts.values()) {
       try {
-        global += context.global.count();
+        // Shared across worktrees: count once.
+        if (!globalCounted) {
+          global += context.global.count();
+          globalCounted = true;
+        }
         project += context.project.count();
       } catch {
         /* a broken store should not break stats */
@@ -213,12 +234,13 @@ export class MemoryHub {
   }
 
   releaseSession(worktree: string, sessionID: string): void {
-    const context = this.contexts.get(worktree);
+    const context = this.contexts.get(safeRealpath(worktree));
     if (!context) return;
     const store = context.sessions.get(sessionID);
     store?.forgetAll();
     context.sessions.delete(sessionID);
     context.capture.clear(sessionID);
+    context.injector.releaseSession(sessionID);
     context.injector.invalidate();
   }
 
