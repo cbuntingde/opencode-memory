@@ -80,22 +80,41 @@ opencode plugin add github:cbuntingde/opencode-memory#v0.1.0
 
 ### Per-project, from a clone
 
-Add the entry to `opencode.json` in the project you want memory for:
+Add the entry to `opencode.json` in the project you want memory for. OpenCode
+v2 uses the `plugins` key; v1 uses the singular `plugin` key with a
+`[package, options]` tuple:
 
 ```jsonc
+// v2
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": ["opencode-memory-local"]
 }
 ```
 
+```jsonc
+// v1
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-memory-local"]
+}
+```
+
 With options:
 
 ```jsonc
+// v2
 {
   "plugins": [
     { "package": "opencode-memory-local", "options": { "recallMode": "direct" } }
   ]
+}
+```
+
+```jsonc
+// v1
+{
+  "plugin": [["opencode-memory-local", { "recallMode": "direct" }]]
 }
 ```
 
@@ -105,11 +124,13 @@ No install step. Point OpenCode straight at the source:
 
 ```ts
 // <repo>/.opencode/plugins/opencode-memory.ts
-export { default } from "../../src/index.ts";
+export { MemoryPlugin, default } from "../../src/index.ts";
 ```
 
 Files in `.opencode/plugins/` are loaded automatically, and `opencode plugin list`
-shows the plugin as `opencode-memory`.
+shows the plugin as `opencode-memory`. The default export serves v2 (`setup`)
+and v1.18.29+ (`server`); the named `MemoryPlugin` export keeps the v1 function
+shape available to local-file loading.
 
 ### Packaging notes
 
@@ -145,11 +166,12 @@ The package default-exports both generations, so one install works on OpenCode v
 
 ### Permissions
 
-Reads are safe to auto-approve; writes should not be:
+Reads are safe to auto-approve; writes should not be. On OpenCode v2 this
+is the `permissions` array in `opencode.json`:
 
 ```jsonc
 {
-  "permission": [
+  "permissions": [
     { "action": "memory_recall", "resource": "*", "effect": "allow" },
     { "action": "memory_search", "resource": "*", "effect": "allow" },
     { "action": "memory_list", "resource": "*", "effect": "allow" },

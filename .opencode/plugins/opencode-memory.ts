@@ -1,1 +1,1 @@
-﻿export { default } from "../../src/index.ts";
+export { MemoryPlugin, default } from "../../src/index.ts";

@@ -44,7 +44,9 @@ export const memoryPluginV2 = Plugin.define({
   id: "opencode-memory",
 
   async setup(ctx) {
-    const logger = createLogger((ctx as unknown as { client?: unknown }).client);
+    // V2 exposes no client.app.log; without a client the logger keeps
+    // debug/info silent and sends warn/error to the console.
+    const logger = createLogger(undefined);
     const worktree = String(ctx.location.project.canonical ?? ctx.location.directory);
     const globalDir = defaultGlobalDir();
 
@@ -70,6 +72,19 @@ export const memoryPluginV2 = Plugin.define({
         if (!Array.isArray(messages)) return undefined;
         for (let i = messages.length - 1; i >= 0; i -= 1) {
           const message = messages[i] as Record<string, unknown>;
+          // Assistant messages carry `content: [{ type: "text", text }]`; user
+          // messages carry `text` directly. A `parts` array is accepted too so
+          // older shapes still resolve instead of silently yielding nothing.
+          const content = message["content"];
+          if (Array.isArray(content)) {
+            const chunks = content
+              .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+              .filter((entry) => entry["type"] === "text" && typeof entry["text"] === "string")
+              .map((entry) => String(entry["text"]));
+            if (chunks.length > 0) return chunks.join("\n");
+            continue;
+          }
+          if (typeof message["text"] === "string" && message["text"]) return String(message["text"]);
           const parts = message["parts"];
           if (!Array.isArray(parts)) continue;
           const chunks = parts
@@ -148,6 +163,8 @@ export const memoryPluginV2 = Plugin.define({
     };
 
     // --- tools -------------------------------------------------------------
+    // The transform callback is synchronous by contract: it only registers
+    // definitions, and the host replays it whenever tool state is rebuilt.
     await ctx.tool.transform((editor) => {
       for (const name of TOOL_NAMES) {
         const spec = TOOL_SPECS[name];
@@ -261,17 +278,16 @@ export const memoryPluginV2 = Plugin.define({
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           const type = (event as { type?: unknown }).type;
-          const properties = (event as { properties?: unknown }).properties as
-            | Record<string, unknown>
-            | undefined;
-          if (!properties) continue;
-          const direct = typeof properties["sessionID"] === "string" ? properties["sessionID"] : undefined;
-          const info = properties["info"] as Record<string, unknown> | undefined;
-          const sessionID = direct ?? (info && typeof info["id"] === "string" ? info["id"] : undefined);
+          // V2 events carry their payload in `data` (v1 used `properties`).
+          const data = (event as { data?: unknown }).data as Record<string, unknown> | undefined;
+          if (!data) continue;
+          const sessionID = typeof data["sessionID"] === "string" ? data["sessionID"] : undefined;
 
           if (type === "session.idle" && sessionID) await onTurnIdle(sessionID);
           else if (type === "session.created") hub.sweepAll();
-          else if (type === "session.compacted" && sessionID) await storeCompactionSummary(sessionID);
+          // V2 reports a finished compaction as `session.compaction.ended`;
+          // there is no `session.compacted` event in v2.
+          else if (type === "session.compaction.ended" && sessionID) await storeCompactionSummary(sessionID);
           else if (type === "session.deleted" && sessionID) hub.releaseSession(worktree, sessionID);
         }
       } catch (error) {

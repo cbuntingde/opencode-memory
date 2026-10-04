@@ -294,18 +294,28 @@ function collectPartText(parts: unknown): string {
 
 function extractLatestAssistantText(data: unknown): string | undefined {
   if (typeof data !== "object" || data === null) return undefined;
-  const container = data as Record<string, unknown>;
-  const parts = Array.isArray(container["parts"]) ? container["parts"] : Array.isArray(data) ? data : undefined;
-  if (!parts) return undefined;
+  // `session.messages` returns an array of `{ info, parts }` entries; a bare
+  // `{ parts }` object is accepted too so older shapes still resolve.
+  const messages: unknown[] = Array.isArray(data) ? data : [data];
 
   let best: { text: string; score: number } | undefined;
-  for (const part of parts) {
-    if (typeof part !== "object" || part === null) continue;
+  const consider = (part: unknown): void => {
+    if (typeof part !== "object" || part === null) return;
     const record = part as Record<string, unknown>;
-    if (record["type"] !== "text" || typeof record["text"] !== "string") continue;
+    if (record["type"] !== "text" || typeof record["text"] !== "string") return;
     const time = (record["time"] as Record<string, unknown> | undefined)?.["end"];
     const score = (typeof time === "number" ? time : 0) * 1_000 + String(record["messageID"] ?? "").length;
     if (!best || score >= best.score) best = { text: record["text"], score };
+  };
+
+  for (const message of messages) {
+    if (typeof message !== "object" || message === null) continue;
+    const parts = (message as Record<string, unknown>)["parts"];
+    if (Array.isArray(parts)) {
+      for (const part of parts) consider(part);
+    } else {
+      consider(message);
+    }
   }
   return best?.text;
 }
