@@ -89,6 +89,14 @@ export class SessionStore {
     return this.list({ limit, includeReview: false });
   }
 
+  /** Flagged rows, oldest first, so the injector can re-check them. */
+  review(limit: number): MemoryRecord[] {
+    return [...this.records.values()]
+      .filter((record) => record.needsReview)
+      .sort((a, b) => a.updatedAt - b.updatedAt)
+      .slice(0, Math.max(1, limit));
+  }
+
   search(query: string, options: { limit?: number; kind?: MemoryKind } = {}): MemoryRecord[] {
     const tokens = tokenize(query);
     if (tokens.length === 0) return this.list(options);

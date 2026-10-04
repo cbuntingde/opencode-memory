@@ -19,6 +19,8 @@ export interface InjectableStore {
   revision: number;
   repo: string;
   recent(limit: number): MemoryRecord[];
+  /** Flagged rows, oldest first; re-checked on a slow timer so flags can clear. */
+  review(limit: number): MemoryRecord[];
   touch(id: string, validated: boolean): unknown;
   setNeedsReview(id: string, needsReview: boolean): void;
 }
@@ -59,6 +61,10 @@ const PROTOCOL = [
   "- Call memory_add with a code citation when you learn something durable (convention, build command, invariant).",
   "- Call memory_recall before concluding that nothing is known about a topic.",
 ].join("\n");
+
+/** How often flagged memories are re-verified, and how many per pass. */
+const RECHECK_INTERVAL_MS = 5 * 60_000;
+const RECHECK_BATCH = 20;
 
 export function renderBlock(options: {
   profile: Array<{ record: MemoryRecord; label: string }>;
@@ -129,8 +135,8 @@ export class Injector {
   private readonly cache = new Map<string, { at: number; key: string; result: BuildResult }>();
   /** `${sessionID}:${memoryId}` pairs already persisted this session. */
   private readonly recorded = new Set<string>();
-  private readonly usedPerSession = new Map<string, Set<string>>();
   private readonly statsBySession = new Map<string, InjectStats>();
+  private lastRecheckAt = 0;
   private readonly totals: InjectStats = { recalled: 0, saved: 0, verified: 0, partial: 0, withheld: 0 };
   private lastActivity: InjectStats["lastActivity"];
 
@@ -172,7 +178,14 @@ export class Injector {
     }
 
     const stats = this.currentStats(sessionID);
-    const seen = this.usedPerSession.get(sessionID) ?? new Set<string>();
+    this.recheckFlagged();
+    // Scoped to this build on purpose. Its job is to stop the same fact
+    // appearing twice in one block - once from the profile pass and again from
+    // the project pass - not to ration a fact to a single appearance per
+    // session. The context hook rebuilds on every model request, so a set that
+    // survived between builds emptied the block after the cache TTL expired and
+    // left the session with no memory at all.
+    const seen = new Set<string>();
 
     const profileCandidates = globalStore.recent(config.maxMemoriesPerInject * 2);
     const projectCandidates = projectStore.recent(config.maxMemoriesPerInject * 3);
@@ -232,7 +245,6 @@ export class Injector {
     });
 
     const ids = [...trimmedProfile, ...trimmedProject, ...trimmedSession].map((entry) => entry.record.id);
-    this.usedPerSession.set(sessionID, seen);
 
     const result: BuildResult = { block, ids, stats };
     this.cache.set(sessionID, { at: this.now(), key: revisionKey, result });
@@ -242,11 +254,70 @@ export class Injector {
     return result;
   }
 
-  /** Drops a session's cached block, dedup set and counters. */
+  /** Drops a session's cached block and counters. */
   releaseSession(sessionID: string): void {
     this.cache.delete(sessionID);
-    this.usedPerSession.delete(sessionID);
     this.statsBySession.delete(sessionID);
+  }
+
+  /**
+   * Re-verifies flagged memories and clears the flag on any that hold up again.
+   *
+   * Flagging is one-way in every read path: a flagged row is excluded from
+   * `recent`, `list` and `search`, so it is never offered for verification and
+   * one transient failure - a citation that missed a path, a file moved during
+   * a refactor - stranded the fact permanently, with no route back except
+   * remembering to pass `includeReview` to `memory_list`. Running this on a
+   * slow timer makes the flag recoverable on its own.
+   *
+   * Deliberately cheap and infrequent: it touches the filesystem once per
+   * interval rather than on every rebuild, and it never re-flags, so a fact
+   * that is genuinely stale stays withheld.
+   */
+  private recheckFlagged(): void {
+    const now = this.now();
+    if (now - this.lastRecheckAt < RECHECK_INTERVAL_MS) return;
+    this.lastRecheckAt = now;
+
+    const stores: Array<InjectableStore | null | undefined> = [
+      this.deps.globalStore,
+      this.deps.projectStore,
+      this.deps.sessionStore,
+    ];
+
+    for (const store of stores) {
+      if (!store) continue;
+      let flagged: MemoryRecord[];
+      try {
+        flagged = store.review(RECHECK_BATCH);
+      } catch (error) {
+        this.deps.logger?.warn("could not read flagged memories", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      for (const record of flagged) {
+        const result = verifyRecord(record, this.deps.worktree, this.deps.verifyDeps);
+        if (result.state === "invalid") continue;
+        try {
+          store.setNeedsReview(record.id, false);
+          store.touch(record.id, result.state === "valid");
+          this.deps.logger?.info("cleared review flag; cited evidence holds again", {
+            id: record.id,
+            state: result.state,
+          });
+        } catch (error) {
+          this.deps.logger?.warn("could not clear review flag", {
+            id: record.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    // Clearing a flag mutates the stores, so the cached block is now stale.
+    this.invalidate();
   }
 
   private currentStats(sessionID: string): InjectStats {
