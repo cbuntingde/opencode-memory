@@ -1,5 +1,5 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { citationKey, formatCitation, parseCitations } from "./citation.ts";
 import { hashFromProjectKey } from "./scopes.ts";
@@ -23,8 +23,19 @@ import {
  * two files must always agree - that invariant is covered by tests.
  */
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS memories (
+/**
+ * The schema is a list of statements rather than one script, and that shape is
+ * load-bearing. Handing the whole script to a single `run()` makes bun:sqlite
+ * prepare every statement before executing any of them, so when a write is
+ * blocked the failure is reported from the first *prepared* statement instead
+ * of the one that actually failed: a busy index surfaces as
+ * `no such table: main.memories` from the index statement. That reads exactly
+ * like a structurally broken file, and it is what used to send healthy indexes
+ * into quarantine whenever two OpenCode processes started at once. Applied one
+ * at a time, the real cause is the error that gets reported.
+ */
+const SCHEMA_STATEMENTS: string[] = [
+  `CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   scope TEXT NOT NULL,
   repo_key TEXT NOT NULL,
@@ -40,10 +51,56 @@ CREATE TABLE IF NOT EXISTS memories (
   use_count INTEGER NOT NULL DEFAULT 0,
   expires_at INTEGER NOT NULL,
   needs_review INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_scope_repo ON memories(scope, repo_key, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_scope_repo_id ON memories(scope, repo_id, updated_at DESC);
-`;
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_scope_repo ON memories(scope, repo_key, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_scope_repo_id ON memories(scope, repo_id, updated_at DESC)`,
+];
+
+/**
+ * How long a single attempt waits for a competing writer, and how many attempts
+ * are made. Writes here are short inserts, so contention windows are tiny and
+ * one short wait absorbs nearly all of them; the extra attempts cover writers
+ * that land between tries. Kept modest so a genuinely stuck database fails
+ * quickly rather than stalling a model request.
+ */
+const BUSY_TIMEOUT_MS = 1_000;
+const OPEN_ATTEMPTS = 3;
+
+const BUSY_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_PROTOCOL"]);
+const CORRUPT_CODES = new Set(["SQLITE_CORRUPT", "SQLITE_NOTADB"]);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sqliteErrorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" ? code : "";
+}
+
+/**
+ * True when the index is merely busy, which is contention and not damage.
+ *
+ * Several OpenCode processes share one global index, so this is routine. The
+ * message is checked as well as the result code because bun:sqlite does not
+ * always classify every busy failure, and a code that is present but
+ * unrecognised must not short-circuit the message that identifies it.
+ */
+function isBusyError(error: unknown): boolean {
+  if (BUSY_CODES.has(sqliteErrorCode(error))) return true;
+  return /database is locked|database table is locked|locking protocol/i.test(errorMessage(error));
+}
+
+/** True only for a file that is genuinely unreadable, and safe to move aside. */
+function isCorruptError(error: unknown): boolean {
+  if (CORRUPT_CODES.has(sqliteErrorCode(error))) return true;
+  return /malformed|corrupt|not a database|file is encrypted/i.test(errorMessage(error));
+}
+
+/** Brief increasing pause between open attempts, so contenders interleave. */
+function backoff(attempt: number): void {
+  Bun.sleepSync(attempt * 50);
+}
 
 const INSERT_SQL = `INSERT OR REPLACE INTO memories
   (id, scope, repo_key, repo_id, subject, fact, citations, reason, kind,
@@ -225,10 +282,7 @@ export class MemoryStore {
 
     let attempt: Database | null = null;
     try {
-      attempt = new Database(this.indexPath, { create: true });
-      this.migrate(attempt);
-      execSql(attempt, SCHEMA);
-      this.backfillIdentity(attempt);
+      attempt = this.openAndInitialise();
       this.db = attempt;
       if (!existed && existsSync(this.markdownPath)) {
         this.rebuildFromMarkdown();
@@ -242,26 +296,94 @@ export class MemoryStore {
       } catch {
         /* already unusable */
       }
+      this.db = null;
+
+      // Contention is not damage. A second OpenCode process holding the write
+      // lock makes the index briefly unusable, and quarantining it destroyed a
+      // healthy database - recoverable only from a Markdown mirror that may
+      // itself be stale. The retry loop above has already waited this out.
+      if (isBusyError(error)) {
+        throw new Error(
+          `index.db at ${this.indexPath} is locked by another process after ${OPEN_ATTEMPTS} attempts: ${errorMessage(error)}`,
+        );
+      }
+
       this.logger?.warn("index.db unreadable; attempting rebuild from Markdown", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
+
+      if (!isCorruptError(error)) {
+        // Unreadable for a reason we cannot classify. Moving the file aside
+        // would discard the only copy, so fail loudly and let the caller
+        // decide rather than silently quarantining a file that may be fine.
+        throw new Error(`index.db at ${this.indexPath} could not be opened: ${errorMessage(error)}`);
+      }
     }
 
     this.quarantineIndex();
 
-    const db = new Database(this.indexPath, { create: true });
-    this.migrate(db);
-    execSql(db, SCHEMA);
-    this.backfillIdentity(db);
+    const db = this.openAndInitialise();
     this.db = db;
     try {
       this.rebuildFromMarkdown();
     } catch (error) {
       this.logger?.warn("Markdown rebuild failed; starting with an empty store", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return db;
+  }
+
+  /**
+   * Opens the index and brings it to the current shape, waiting out contention.
+   *
+   * The retry wraps the whole sequence rather than just the file open, because
+   * the schema statements are where a busy index actually fails - opening a
+   * locked database and setting a busy timeout both succeed. A busy timeout
+   * makes each attempt wait for a competing writer instead of failing on
+   * contact, and the loop covers writers that arrive between attempts.
+   */
+  private openAndInitialise(): Database {
+    let lastFailure: unknown = null;
+    for (let attempt = 1; attempt <= OPEN_ATTEMPTS; attempt += 1) {
+      let db: Database | null = null;
+      try {
+        db = new Database(this.indexPath, { create: true });
+        db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+        try {
+          // An optimisation, not a correctness requirement: a database that
+          // cannot switch journal modes is still perfectly usable. A damaged
+          // file is a different matter - reporting it here lets the quarantine
+          // path see the real cause instead of a later symptom.
+          db.exec(`PRAGMA journal_mode = WAL`);
+        } catch (error) {
+          if (isCorruptError(error)) throw error;
+          this.logger?.debug("could not enable write-ahead logging", {
+            error: errorMessage(error),
+          });
+        }
+        this.initialise(db);
+        return db;
+      } catch (error) {
+        try {
+          db?.close();
+        } catch {
+          /* already unusable */
+        }
+        lastFailure = error;
+        if (!isBusyError(error) || attempt === OPEN_ATTEMPTS) throw error;
+        backoff(attempt);
+      }
+    }
+    /* unreachable: the loop either returns or throws */
+    throw lastFailure ?? new Error(`index.db at ${this.indexPath} could not be opened`);
+  }
+
+  /** Brings a freshly opened index to the current column and index shape. */
+  private initialise(db: Database): void {
+    this.migrate(db);
+    for (const statement of SCHEMA_STATEMENTS) execSql(db, statement);
+    this.backfillIdentity(db);
   }
 
   /**
@@ -275,8 +397,11 @@ export class MemoryStore {
   private migrate(db: Database): void {
     try {
       execSql(db, `ALTER TABLE memories ADD COLUMN repo_id TEXT NOT NULL DEFAULT ''`);
-    } catch {
-      // Column already present, or the table does not exist yet on a new index.
+    } catch (error) {
+      // Expected: the column is already present, or the table does not exist
+      // yet on a new index. A busy index is neither - report it so the retry in
+      // openIndex can do its job rather than leaving a half-migrated file.
+      if (isBusyError(error)) throw error;
     }
   }
 
@@ -307,19 +432,24 @@ export class MemoryStore {
     }
   }
 
-  /** Moves a damaged index aside, falling back to deletion when it is locked. */
+  /**
+   * Moves a damaged index aside.
+   *
+   * Only reached for a file that classifies as structurally corrupt. A failed
+   * rename leaves the file in place rather than falling back to deletion: a
+   * rename that fails is almost always another process still holding the file
+   * open, which is precisely when the index is most likely to be healthy, and
+   * deleting it would destroy the only copy of a store whose Markdown mirror
+   * may already be stale.
+   */
   private quarantineIndex(): void {
     if (!existsSync(this.indexPath)) return;
     try {
       renameSync(this.indexPath, `${this.indexPath}.corrupt-${this.now()}`);
-    } catch {
-      try {
-        rmSync(this.indexPath, { force: true });
-      } catch (error) {
-        this.logger?.warn("could not quarantine damaged index.db", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    } catch (error) {
+      this.logger?.warn("could not quarantine damaged index.db; leaving it in place", {
+        error: errorMessage(error),
+      });
     }
   }
 
@@ -403,6 +533,25 @@ export class MemoryStore {
   /** Most recently updated, unflagged records: the session-start candidate set. */
   recent(limit: number): MemoryRecord[] {
     return this.list({ limit, includeReview: false });
+  }
+
+  /**
+   * Rows currently flagged for review, oldest flag first.
+   *
+   * Flagged rows are excluded from every read path, which is what keeps a stale
+   * fact out of context - but it also means they are never re-checked, so a
+   * single transient verification failure exiled a fact permanently. The
+   * injector walks this list on a slow timer and clears the flag on anything
+   * that verifies again.
+   */
+  review(limit: number): MemoryRecord[] {
+    const rows = all<Row>(
+      this.connect().query(
+        `SELECT * FROM memories WHERE scope = ? AND ${this.identityClause} AND needs_review = 1 ORDER BY updated_at ASC LIMIT ?`,
+      ),
+      [this.scope, ...this.identityParams, clampLimit(limit)],
+    );
+    return rows.map(fromRow);
   }
 
   /**
